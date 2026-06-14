@@ -52,10 +52,13 @@
           :w2l {usage.cu.w2.label} :w2p {usage.cu.w2.pct} :w2s {usage.cu.w2.state} :w2r {usage.cu.w2.reset} :w2v {usage.cu.w2.present})))
 
 ;; Full-screen transparent backdrop so a click outside the popup dismisses it.
-(defwindow usage
+;; `xpos` (px from the left edge) is supplied at open time by
+;; agent-usage-popup.sh to centre the popup under the clicked chip.
+(defwindow usage [xpos]
   :monitor 0
-  :geometry (geometry :x "0px" :y "0px" :anchor "top right" :width "100%" :height "100%")
+  :geometry (geometry :x "0px" :y "0px" :anchor "top left" :width "100%" :height "100%")
   :stacking "overlay"
   (eventbox :class "backdrop" :onclick "agent-usage-popup close"
-    (box :orientation "v" :halign "end" :valign "start" :space-evenly false
-      (eventbox :onclick "true" (usage-content)))))
+    (box :orientation "v" :halign "start" :valign "start" :space-evenly false
+      (box :class "anchor" :style {"margin-left: " + xpos + "px;"} :orientation "v" :space-evenly false
+        (eventbox :onclick "true" (usage-content))))))
