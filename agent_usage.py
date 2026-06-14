@@ -421,20 +421,112 @@ def fetch_kimi() -> ProviderUsage:
 
 
 # --------------------------------------------------------------------------
+# Provider: Cursor (editor session token -> usage-summary API)
+# --------------------------------------------------------------------------
+def _cursor_token() -> str | None:
+    """Read the Cursor editor's OAuth access token from its SQLite state DB."""
+    import sqlite3
+
+    db = _home() / ".config" / "Cursor" / "User" / "globalStorage" / "state.vscdb"
+    if not db.is_file():
+        return None
+    try:
+        # immutable/read-only so we never lock the editor's live DB.
+        con = sqlite3.connect(f"file:{db}?mode=ro&immutable=1", uri=True)
+        try:
+            row = con.execute(
+                "SELECT value FROM ItemTable WHERE key='cursorAuth/accessToken' LIMIT 1"
+            ).fetchone()
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return None
+    if not row or not row[0]:
+        return None
+    return row[0].decode() if isinstance(row[0], bytes) else str(row[0])
+
+
+def fetch_cursor() -> ProviderUsage:
+    p = ProviderUsage(tag="cu", name="Cursor")
+    token = _cursor_token()
+    if not token:
+        p.configured = False
+        return p
+
+    # userId = last segment (after '|') of the JWT `sub` claim.
+    try:
+        parts = token.split(".")
+        sub = _b64url_json(parts[1]).get("sub", "") if len(parts) >= 2 else ""
+        user_id = sub.split("|")[-1]
+    except Exception:
+        user_id = ""
+    if not user_id:
+        p.error = "bad token"
+        return p
+
+    cookie = f"WorkosCursorSessionToken={user_id}%3A%3A{token}"
+    req = urllib.request.Request(
+        "https://cursor.com/api/usage-summary",
+        headers={"Accept": "application/json", "Cookie": cookie},
+    )
+    try:
+        data = _http_json(req)
+    except urllib.error.HTTPError as e:
+        p.error = "expired" if e.code in (401, 403) else f"http {e.code}"
+        return p
+    except (urllib.error.URLError, json.JSONDecodeError, OSError):
+        p.error = "offline"
+        return p
+
+    plan = ((data.get("individualUsage") or {}).get("plan")) or {}
+    pct = plan.get("totalPercentUsed")
+    if pct is None:
+        # fall back to used/limit (cents) if the percent field is absent
+        used, limit = plan.get("used"), plan.get("limit")
+        if used is not None and limit:
+            pct = used / limit * 100.0
+    if pct is None:
+        p.error = "no data"
+        return p
+
+    # Cursor only has a monthly billing-cycle window — label it "mo".
+    reset = _parse_reset(data.get("billingCycleEnd"))
+    p.windows.append(Window("mo", max(0.0, min(100.0, float(pct))), reset))
+    return p
+
+
+# --------------------------------------------------------------------------
 # Aggregation + rendering
 # --------------------------------------------------------------------------
-PROVIDERS = [fetch_claude, fetch_codex, fetch_kimi]
+# Ordered registry of every known provider: tag -> (display name, fetcher).
+PROVIDERS: dict[str, tuple[str, "callable"]] = {
+    "cc": ("Claude Code", fetch_claude),
+    "cx": ("Codex", fetch_codex),
+    "km": ("Kimi", fetch_kimi),
+    "cu": ("Cursor", fetch_cursor),
+}
+ALL_TAGS = list(PROVIDERS.keys())
+DEFAULT_TAGS = ["cc", "cx"]
 
 
-def collect() -> list[ProviderUsage]:
+def resolve_selection(arg: str | None) -> list[str]:
+    """Which providers to show: --providers / $AGENT_USAGE_PROVIDERS / default."""
+    raw = arg or os.environ.get("AGENT_USAGE_PROVIDERS") or ""
+    tags = [t.strip() for t in raw.split(",") if t.strip()]
+    if not tags:
+        return list(DEFAULT_TAGS)
+    # keep only known tags, in the registry's canonical order
+    return [t for t in ALL_TAGS if t in tags]
+
+
+def collect(selected: list[str]) -> list[ProviderUsage]:
     results = []
-    for fn in PROVIDERS:
+    for tag in selected:
+        name, fn = PROVIDERS[tag]
         try:
             results.append(fn())
-        except Exception as e:  # never let one provider take down the bar
-            name = fn.__name__.replace("fetch_", "")
-            r = ProviderUsage(tag=name[:2], name=name.title(), error="crash")
-            results.append(r)
+        except Exception:  # never let one provider take down the bar
+            results.append(ProviderUsage(tag=tag, name=name, error="crash"))
     return results
 
 
@@ -512,11 +604,14 @@ def _win_state(pct: float | None) -> str:
 def to_eww(results: list[ProviderUsage]) -> str:
     """JSON keyed by provider tag, shaped for the eww popup's fixed rows.
 
-    Each provider exposes its 5-hour window (`w1`) and its weekly/long window
-    (`w2`) as separate bars, each with its own colour state and reset ETA, so
-    the eww config can render two bars per provider declaratively.
+    Emits an entry for *every* known provider so the eww config's fixed rows
+    can index it; `shown` reflects the --providers selection (rows for
+    unselected providers stay hidden). Each provider exposes a 5-hour window
+    (`w1`) and a longer window (`w2`: weekly, or Cursor's monthly cycle), each
+    with its own colour state and reset ETA.
     """
     now = time.time()
+    by_tag = {r.tag: r for r in results}
 
     def slot(w: Window | None) -> dict:
         if w is None:
@@ -530,12 +625,20 @@ def to_eww(results: list[ProviderUsage]) -> str:
         }
 
     out = {}
-    for r in results:
+    for tag in ALL_TAGS:
+        name = PROVIDERS[tag][0]
+        r = by_tag.get(tag)
+        if r is None:  # not selected this run -> hidden placeholder
+            empty = slot(None)
+            out[tag] = {"name": name, "present": False, "shown": False,
+                        "error": "", "w1": empty, "w2": empty}
+            continue
         five = next((w for w in r.windows if w.name == "5h"), None)
-        week = next((w for w in r.windows if w.name in ("7d", "wk")), None)
-        out[r.tag] = {
+        week = next((w for w in r.windows if w.name in ("7d", "wk", "mo")), None)
+        out[tag] = {
             "name": r.name,
             "present": r.configured,
+            "shown": True,
             "error": r.error or "",
             "w1": slot(five),
             "w2": slot(week),
@@ -586,17 +689,22 @@ def main(argv=None) -> int:
     g.add_argument("--eww", action="store_true", help="JSON shaped for the eww popup")
     ap.add_argument("--interval", type=int, default=60,
                     help="seconds between refreshes in --watch mode (default 60)")
+    ap.add_argument("--providers", metavar="cc,cx,km,cu",
+                    help="comma-separated providers to show (default: cc,cx; "
+                         "also via $AGENT_USAGE_PROVIDERS). Known: "
+                         + ",".join(ALL_TAGS))
     args = ap.parse_args(argv)
+    selected = resolve_selection(args.providers)
 
     if args.watch:
         while True:
             try:
-                print(render_waybar(collect()), flush=True)
+                print(render_waybar(collect(selected)), flush=True)
             except Exception:
                 print(json.dumps({"text": "agents ?", "alt": "alert"}), flush=True)
             time.sleep(max(5, args.interval))
 
-    results = collect()
+    results = collect(selected)
     if args.detail:
         print(render_detail(results))
     elif args.notify:

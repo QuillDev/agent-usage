@@ -18,10 +18,7 @@ any bar (Waybar, etc.).
 | **Codex** (`cx`) | `~/.codex/sessions/**/*.jsonl` | none | Reads the `rate_limits` object Codex writes into every `token_count` event. Fully local. |
 | **Claude Code** (`cc`) | `GET https://api.anthropic.com/api/oauth/usage` | OAuth token from `~/.claude/.credentials.json` (`claudeAiOauth.accessToken`) | Reports `five_hour`, `seven_day`, and (if present) the Opus weekly cap. Honours `CLAUDE_CONFIG_DIR`. |
 | **Kimi** (`km`) | `GET https://api.kimi.com/coding/v1/usages` | OAuth token from `~/.kimi-code/credentials/kimi-code.json` | The access token is short-lived (~15 min); it's refreshed via the `refresh_token` against `https://auth.kimi.com/api/oauth/token` and written back atomically (preserving file mode `600`), the same way the kimi-code CLI does. |
-
-**Cursor is not implemented.** Cursor only exposes usage through an
-authenticated browser session (cookies); there's no clean, headless path for it
-on Linux. PRs welcome.
+| **Cursor** (`cu`) | `GET https://cursor.com/api/usage-summary` | session token read from the Cursor editor's `~/.config/Cursor/User/globalStorage/state.vscdb` (`cursorAuth/accessToken`) | Builds the `WorkosCursorSessionToken` cookie from the editor token (no browser needed). Cursor only has a **monthly billing-cycle** window (`mo`) — no 5h/weekly. |
 
 This tool stores no secrets of its own. It reads the credential files the CLIs
 already wrote and never copies tokens elsewhere. A provider that isn't installed
@@ -37,7 +34,17 @@ agent-usage --detail     # multi-line breakdown with reset ETAs
 agent-usage --notify     # send the breakdown as a desktop notification
 agent-usage --json       # structured output (all windows)
 agent-usage --eww        # JSON keyed by provider, shaped for the eww popup
+agent-usage --providers cc,cx,km,cu   # choose which providers to show
 ```
+
+### Choosing providers
+
+By default only **Claude Code and Codex** (`cc,cx`) are shown. Select providers
+with `--providers cc,cx,km,cu` (canonical order) or the `AGENT_USAGE_PROVIDERS`
+environment variable. Known tags: `cc` (Claude Code), `cx` (Codex), `km` (Kimi),
+`cu` (Cursor). Only the selected providers are fetched, so unused ones cost
+nothing. In `--eww` mode every known provider is emitted with a `shown` flag so
+a fixed-row popup can hide the ones you didn't select.
 
 The headline percentage per provider is the **most-constrained** window — the
 number that actually predicts a throttle. `--watch` emits an icon-only chip

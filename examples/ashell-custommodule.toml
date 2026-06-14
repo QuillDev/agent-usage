@@ -7,7 +7,9 @@
 name = "AgentUsage"
 type = "Button"
 icon = ""                                  # Nerd Font gauge (U+F0E4)
-listen_cmd = "agent-usage --watch --interval 60"
+# --providers picks which agents to show (default: cc,cx). Keep it consistent
+# with the eww poll command in eww.yuck.
+listen_cmd = "agent-usage --watch --interval 60 --providers cc,cx,km,cu"
 command = "agent-usage-popup"
 alert = "\"alt\":\"alert\""                 # red dot at >=80% or on error
 
