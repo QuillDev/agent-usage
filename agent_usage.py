@@ -401,19 +401,19 @@ def fetch_kimi() -> ProviderUsage:
         return p
 
     # Weekly quota lives in `usage`; the 5-hour window in `limits[0].detail`.
-    usage = data.get("usage")
-    if isinstance(usage, dict):
-        pct = _kimi_detail_pct(usage)
-        if pct is not None:
-            # Kimi's weekly quota — labelled "7d" to match the other providers'
-            # long window (it's a rolling 7-day reset).
-            p.windows.append(Window("7d", pct, _kimi_detail_reset(usage)))
+    # Append 5h first, then weekly, so the two bars order like the others.
     limits = data.get("limits")
     if isinstance(limits, list) and limits:
         detail = (limits[0] or {}).get("detail") or {}
         pct = _kimi_detail_pct(detail)
         if pct is not None:
             p.windows.append(Window("5h", pct, _kimi_detail_reset(detail)))
+    usage = data.get("usage")
+    if isinstance(usage, dict):
+        pct = _kimi_detail_pct(usage)
+        if pct is not None:
+            # Kimi's weekly quota — labelled "7d" to match the others' long window.
+            p.windows.append(Window("7d", pct, _kimi_detail_reset(usage)))
 
     if not p.windows:
         p.error = "no data"
@@ -479,19 +479,32 @@ def fetch_cursor() -> ProviderUsage:
         return p
 
     plan = ((data.get("individualUsage") or {}).get("plan")) or {}
+    # Cursor's only window is the monthly billing cycle, but within it the
+    # dashboard breaks usage into Auto-model vs named/API-model percentages.
+    # Show those as the two bars; fall back to the combined total otherwise.
+    reset = _parse_reset(data.get("billingCycleEnd"))
+
+    def clamp(v):
+        return max(0.0, min(100.0, float(v)))
+
+    auto = plan.get("autoPercentUsed")
+    api = plan.get("apiPercentUsed")
+    if auto is not None or api is not None:
+        if auto is not None:
+            p.windows.append(Window("auto", clamp(auto), reset))
+        if api is not None:
+            p.windows.append(Window("api", clamp(api), reset))
+        return p
+
     pct = plan.get("totalPercentUsed")
     if pct is None:
-        # fall back to used/limit (cents) if the percent field is absent
         used, limit = plan.get("used"), plan.get("limit")
         if used is not None and limit:
             pct = used / limit * 100.0
     if pct is None:
         p.error = "no data"
         return p
-
-    # Cursor only has a monthly billing-cycle window — label it "mo".
-    reset = _parse_reset(data.get("billingCycleEnd"))
-    p.windows.append(Window("mo", max(0.0, min(100.0, float(pct))), reset))
+    p.windows.append(Window("mo", clamp(pct), reset))
     return p
 
 
@@ -633,15 +646,17 @@ def to_eww(results: list[ProviderUsage]) -> str:
             out[tag] = {"name": name, "present": False, "shown": False,
                         "error": "", "w1": empty, "w2": empty}
             continue
-        five = next((w for w in r.windows if w.name == "5h"), None)
-        week = next((w for w in r.windows if w.name in ("7d", "wk", "mo")), None)
+        # Two bars, positional: each provider orders its windows primary-first
+        # (5h→7d for Claude/Codex/Kimi, auto→api for Cursor).
+        w1 = r.windows[0] if len(r.windows) >= 1 else None
+        w2 = r.windows[1] if len(r.windows) >= 2 else None
         out[tag] = {
             "name": r.name,
             "present": r.configured,
             "shown": True,
             "error": r.error or "",
-            "w1": slot(five),
-            "w2": slot(week),
+            "w1": slot(w1),
+            "w2": slot(w2),
         }
     return json.dumps(out)
 
