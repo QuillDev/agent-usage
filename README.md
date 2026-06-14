@@ -35,7 +35,13 @@ agent-usage --notify     # send the breakdown as a desktop notification
 agent-usage --json       # structured output (all windows)
 agent-usage --eww        # JSON keyed by provider, shaped for the eww popup
 agent-usage --providers cc,cx,km,cu   # choose which providers to show
+agent-usage --remaining               # show usage left instead of used
 ```
+
+With `--remaining` (or `AGENT_USAGE_REMAINING=1`) every percentage/bar is
+flipped to show how much quota is **left** (a fuel gauge) rather than how much
+is used. The colour still reflects closeness to the limit — a nearly-empty
+remaining bar still turns red — and the chip alert dot is unchanged.
 
 ### Choosing providers
 

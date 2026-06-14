@@ -543,7 +543,12 @@ def collect(selected: list[str]) -> list[ProviderUsage]:
     return results
 
 
-def render_bar(results: list[ProviderUsage]) -> str:
+def _disp(used: float, remaining: bool) -> int:
+    """Number to display for a `used` percentage, flipped to remaining if asked."""
+    return round(max(0.0, min(100.0, (100.0 - used) if remaining else used)))
+
+
+def render_bar(results: list[ProviderUsage], remaining: bool = False) -> str:
     """One compact line, e.g. `cc 12% · cx 9% · km 4%`."""
     parts = []
     for r in results:
@@ -553,7 +558,8 @@ def render_bar(results: list[ProviderUsage]) -> str:
             parts.append(f"{r.tag} !")
         else:
             pct = r.headline_pct
-            parts.append(f"{r.tag} {round(pct)}%" if pct is not None else f"{r.tag} –")
+            # headline is the most-used window; remaining flips to least-left.
+            parts.append(f"{r.tag} {_disp(pct, remaining)}%" if pct is not None else f"{r.tag} –")
     return "  ·  ".join(parts) if parts else "no agents"
 
 
@@ -571,7 +577,7 @@ def _alert_level(results: list[ProviderUsage]) -> str:
     return "ok"
 
 
-def render_waybar(results: list[ProviderUsage]) -> str:
+def render_waybar(results: list[ProviderUsage], remaining: bool = False) -> str:
     """Waybar-format JSON for ashell's CustomModule listen_cmd.
 
     ashell shows `text` as the label, maps `alt` through the `icons` regex,
@@ -579,16 +585,18 @@ def render_waybar(results: list[ProviderUsage]) -> str:
     """
     # The bar chip is icon-only (the full breakdown lives in the eww popup), so
     # `text` is empty; `alt` drives the alert dot and `tooltip` the hover text.
+    # `alt` reflects closeness-to-limit, so it's independent of the remaining flip.
     # Compact separators so a bar's alert regex can match e.g. `"alt":"alert"`.
     return json.dumps({
         "text": "",
         "alt": _alert_level(results),
-        "tooltip": render_detail(results),
+        "tooltip": render_detail(results, remaining),
     }, separators=(",", ":"))
 
 
-def render_detail(results: list[ProviderUsage]) -> str:
+def render_detail(results: list[ProviderUsage], remaining: bool = False) -> str:
     now = time.time()
+    suffix = " left" if remaining else ""
     lines = []
     for r in results:
         if not r.configured:
@@ -599,7 +607,7 @@ def render_detail(results: list[ProviderUsage]) -> str:
             continue
         cells = []
         for w in r.windows:
-            cells.append(f"{w.name} {round(w.used_pct)}% (resets {_fmt_eta(w.resets_at, now)})")
+            cells.append(f"{w.name} {_disp(w.used_pct, remaining)}%{suffix} (resets {_fmt_eta(w.resets_at, now)})")
         lines.append(f"{r.name:<12} " + "   ".join(cells))
     return "\n".join(lines)
 
@@ -614,14 +622,16 @@ def _win_state(pct: float | None) -> str:
     return "ok"
 
 
-def to_eww(results: list[ProviderUsage]) -> str:
+def to_eww(results: list[ProviderUsage], remaining: bool = False) -> str:
     """JSON keyed by provider tag, shaped for the eww popup's fixed rows.
 
     Emits an entry for *every* known provider so the eww config's fixed rows
     can index it; `shown` reflects the --providers selection (rows for
     unselected providers stay hidden). Each provider exposes a 5-hour window
     (`w1`) and a longer window (`w2`: weekly, or Cursor's monthly cycle), each
-    with its own colour state and reset ETA.
+    with its own colour state and reset ETA. With `remaining`, `pct` is flipped
+    to usage left, but `state` still reflects closeness to the limit (so a bar
+    that's nearly empty of remaining quota still goes red).
     """
     now = time.time()
     by_tag = {r.tag: r for r in results}
@@ -631,7 +641,7 @@ def to_eww(results: list[ProviderUsage]) -> str:
             return {"label": "", "pct": 0, "state": "ok", "reset": "", "present": False}
         return {
             "label": w.name,
-            "pct": round(w.used_pct),
+            "pct": _disp(w.used_pct, remaining),
             "state": _win_state(w.used_pct),
             "reset": _fmt_eta(w.resets_at, now),
             "present": True,
@@ -678,8 +688,8 @@ def to_json(results: list[ProviderUsage]) -> str:
     return json.dumps(out, indent=2)
 
 
-def notify(results: list[ProviderUsage]) -> None:
-    body = render_detail(results)
+def notify(results: list[ProviderUsage], remaining: bool = False) -> None:
+    body = render_detail(results, remaining)
     try:
         subprocess.run(
             ["notify-send", "-a", "agent-usage", "-i", "utilities-system-monitor",
@@ -708,28 +718,33 @@ def main(argv=None) -> int:
                     help="comma-separated providers to show (default: cc,cx; "
                          "also via $AGENT_USAGE_PROVIDERS). Known: "
                          + ",".join(ALL_TAGS))
+    ap.add_argument("--remaining", action="store_true",
+                    help="show usage remaining instead of used (also via "
+                         "$AGENT_USAGE_REMAINING=1); colour still reflects "
+                         "closeness to the limit")
     args = ap.parse_args(argv)
     selected = resolve_selection(args.providers)
+    remaining = args.remaining or os.environ.get("AGENT_USAGE_REMAINING") in ("1", "true", "yes")
 
     if args.watch:
         while True:
             try:
-                print(render_waybar(collect(selected)), flush=True)
+                print(render_waybar(collect(selected), remaining), flush=True)
             except Exception:
                 print(json.dumps({"text": "agents ?", "alt": "alert"}), flush=True)
             time.sleep(max(5, args.interval))
 
     results = collect(selected)
     if args.detail:
-        print(render_detail(results))
+        print(render_detail(results, remaining))
     elif args.notify:
-        notify(results)
+        notify(results, remaining)
     elif args.json:
         print(to_json(results))
     elif args.eww:
-        print(to_eww(results))
+        print(to_eww(results, remaining))
     else:
-        print(render_bar(results))
+        print(render_bar(results, remaining))
     return 0
 
 
