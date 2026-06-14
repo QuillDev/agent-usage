@@ -1,0 +1,36 @@
+// agent-usage eww popup styling. Tweak the palette to taste.
+
+* { all: unset; }
+
+.backdrop { background-color: transparent; }
+
+.popup {
+  background-color: rgba(5, 5, 7, 0.97);
+  border: 2px solid #ff4fa3;
+  border-radius: 14px;
+  padding: 16px 18px;
+  // top right bottom left — clear the bar, hug the right edge
+  margin: 40px 8px 0 0;
+}
+
+.title { color: #cdbfca; font-family: "Inter"; font-size: 11px; font-weight: 700; }
+
+.row { padding: 6px 0; }
+.name { color: #f7eef5; font-family: "Inter"; font-size: 13px; font-weight: 600; }
+.err  { color: #f5a524; font-family: "Inter"; font-size: 11px; }
+
+.barrow { padding: 1px 0; }
+.wlabel { color: #cdbfca; font-family: "Inter"; font-size: 11px; font-weight: 600; min-width: 22px; }
+.wpct   { color: #f7eef5; font-family: "Inter"; font-size: 11px; font-weight: 700; min-width: 34px; }
+.reset  { color: #cdbfca; font-family: "Inter"; font-size: 10px; min-width: 30px; }
+
+.bar trough {
+  background-color: #241827;
+  border-radius: 5px;
+  min-height: 7px;
+  min-width: 120px;
+}
+.bar progress { border-radius: 5px; min-height: 7px; }
+.bar-ok progress    { background-color: #ff4fa3; }
+.bar-warn progress  { background-color: #f5a524; }
+.bar-alert progress { background-color: #ff5c8a; }

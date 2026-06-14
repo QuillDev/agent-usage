@@ -1,0 +1,18 @@
+# Drop this into your ashell config.toml. The chip is icon-only (a Nerd Font
+# gauge glyph,  U+F0E4 — needs a Nerd Font installed and discoverable at
+# ashell startup); listen_cmd streams the alert state, and clicking runs the
+# eww popup toggle (see examples/agent-usage-popup.sh + eww.yuck).
+
+[[CustomModule]]
+name = "AgentUsage"
+type = "Button"
+icon = ""                                  # Nerd Font gauge (U+F0E4)
+listen_cmd = "agent-usage --watch --interval 60"
+command = "agent-usage-popup"
+alert = "\"alt\":\"alert\""                 # red dot at >=80% or on error
+
+[modules]
+# Add "AgentUsage" wherever you like; this keeps ashell's defaults.
+left = [ "Workspaces" ]
+center = [ "WindowTitle" ]
+right = [ [ "AgentUsage", "Tempo", "Privacy", "Settings" ] ]

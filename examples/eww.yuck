@@ -1,0 +1,57 @@
+;; agent-usage eww popup — per-provider logo + 5h/weekly bars.
+;; Replace @ICONS@ with the directory holding the provider SVGs. With the Nix
+;; package that is "${agent-usage}/share/agent-usage/icons"; otherwise copy the
+;; icons/ folder somewhere and point @ICONS@ at it.
+;; Pair with examples/agent-usage-popup.sh (bound to your bar's click action).
+
+(defvar usage_open false)
+
+(defpoll usage
+  :interval "30s"
+  :run-while usage_open
+  :initial "{\"cc\":{\"name\":\"Claude Code\",\"present\":true,\"error\":\"\",\"w1\":{\"label\":\"5h\",\"pct\":0,\"state\":\"ok\",\"reset\":\"\",\"present\":true},\"w2\":{\"label\":\"7d\",\"pct\":0,\"state\":\"ok\",\"reset\":\"\",\"present\":true}},\"cx\":{\"name\":\"Codex\",\"present\":true,\"error\":\"\",\"w1\":{\"label\":\"5h\",\"pct\":0,\"state\":\"ok\",\"reset\":\"\",\"present\":true},\"w2\":{\"label\":\"7d\",\"pct\":0,\"state\":\"ok\",\"reset\":\"\",\"present\":true}},\"km\":{\"name\":\"Kimi\",\"present\":true,\"error\":\"\",\"w1\":{\"label\":\"5h\",\"pct\":0,\"state\":\"ok\",\"reset\":\"\",\"present\":true},\"w2\":{\"label\":\"7d\",\"pct\":0,\"state\":\"ok\",\"reset\":\"\",\"present\":true}}}"
+  "agent-usage --eww")
+
+(defwidget barrow [label pct state reset visible]
+  (box :class "barrow" :orientation "h" :space-evenly false :spacing 8 :visible visible
+    (label :class "wlabel" :text label)
+    (progress :class {"bar bar-" + state} :value pct :orientation "h" :hexpand true)
+    (label :class "wpct" :text {pct + "%"})
+    (label :class "reset" :text reset)))
+
+(defwidget prow [logo name error
+                 w1l w1p w1s w1r w1v
+                 w2l w2p w2s w2r w2v
+                 visible]
+  (box :class "row" :orientation "v" :space-evenly false :spacing 5 :visible visible
+    (box :orientation "h" :space-evenly false :spacing 10
+      (image :class "logo" :path logo :image-width 20 :image-height 20)
+      (label :class "name" :halign "start" :hexpand true :text name)
+      (label :class "err" :halign "end" :text error :visible {error != ""}))
+    (barrow :label w1l :pct w1p :state w1s :reset w1r :visible w1v)
+    (barrow :label w2l :pct w2p :state w2s :reset w2r :visible w2v)))
+
+(defwidget usage-content []
+  (box :class "popup" :orientation "v" :space-evenly false :vexpand false :valign "start" :spacing 14
+    (label :class "title" :halign "start" :text "AGENT USAGE")
+    (prow :logo "@ICONS@/claude.svg"
+          :name {usage.cc.name} :error {usage.cc.error} :visible {usage.cc.present}
+          :w1l {usage.cc.w1.label} :w1p {usage.cc.w1.pct} :w1s {usage.cc.w1.state} :w1r {usage.cc.w1.reset} :w1v {usage.cc.w1.present}
+          :w2l {usage.cc.w2.label} :w2p {usage.cc.w2.pct} :w2s {usage.cc.w2.state} :w2r {usage.cc.w2.reset} :w2v {usage.cc.w2.present})
+    (prow :logo "@ICONS@/codex.svg"
+          :name {usage.cx.name} :error {usage.cx.error} :visible {usage.cx.present}
+          :w1l {usage.cx.w1.label} :w1p {usage.cx.w1.pct} :w1s {usage.cx.w1.state} :w1r {usage.cx.w1.reset} :w1v {usage.cx.w1.present}
+          :w2l {usage.cx.w2.label} :w2p {usage.cx.w2.pct} :w2s {usage.cx.w2.state} :w2r {usage.cx.w2.reset} :w2v {usage.cx.w2.present})
+    (prow :logo "@ICONS@/kimi.svg"
+          :name {usage.km.name} :error {usage.km.error} :visible {usage.km.present}
+          :w1l {usage.km.w1.label} :w1p {usage.km.w1.pct} :w1s {usage.km.w1.state} :w1r {usage.km.w1.reset} :w1v {usage.km.w1.present}
+          :w2l {usage.km.w2.label} :w2p {usage.km.w2.pct} :w2s {usage.km.w2.state} :w2r {usage.km.w2.reset} :w2v {usage.km.w2.present})))
+
+;; Full-screen transparent backdrop so a click outside the popup dismisses it.
+(defwindow usage
+  :monitor 0
+  :geometry (geometry :x "0px" :y "0px" :anchor "top right" :width "100%" :height "100%")
+  :stacking "overlay"
+  (eventbox :class "backdrop" :onclick "agent-usage-popup close"
+    (box :orientation "v" :halign "end" :valign "start" :space-evenly false
+      (eventbox :onclick "true" (usage-content)))))
