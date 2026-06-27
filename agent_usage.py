@@ -7,9 +7,12 @@ the bar, how close you are to being throttled — without opening a dashboard.
 
 Providers
 ---------
-- codex  : read locally from ~/.codex/sessions/**/*.jsonl (no network/auth).
-           Codex writes a complete `rate_limits` object into every token_count
-           event; we read the most recent one.
+- codex  : GET https://chatgpt.com/backend-api/codex/usage using the ChatGPT
+           OAuth access token Codex stores in ~/.codex/auth.json — the same
+           live figure `codex /status` shows. When that token is missing or the
+           call fails (offline/expired), we fall back to the most recent
+           `rate_limits` snapshot Codex writes into ~/.codex/sessions/**/*.jsonl
+           (no network/auth, but only as fresh as your last local CLI run).
 - claude : GET https://api.anthropic.com/api/oauth/usage using the OAuth token
            Claude Code stores in ~/.claude/.credentials.json.
 - kimi    : GET https://api.kimi.com/coding/v1/usages using the kimi-code OAuth
@@ -53,8 +56,9 @@ HTTP_TIMEOUT = 15  # seconds
 CLAUDE_CODE_VERSION = "2.1.0"  # User-Agent fallback for the Claude usage call
 CACHE_VERSION = 1
 DEFAULT_CACHE_TTLS = {
-    "cc": 300,  # network APIs are where 429s hurt; refresh at most every 5 min.
-    "cx": 30,   # local file read, cheap but still cache for instant popups.
+    # network APIs are where 429s hurt; refresh at most every 5 min.
+    "cc": 300,
+    "cx": 300,  # now hits a live usage endpoint (was a cheap local read).
     "km": 300,
     "cu": 300,
 }
@@ -313,12 +317,66 @@ def _background_refresh(tag: str) -> None:
 
 
 # --------------------------------------------------------------------------
-# Provider: Codex (local, no auth)
+# Provider: Codex (live usage endpoint, with local-log fallback)
 # --------------------------------------------------------------------------
-def fetch_codex() -> ProviderUsage:
+CODEX_USAGE_URL = "https://chatgpt.com/backend-api/codex/usage"
+
+
+def _codex_home() -> Path:
+    return Path(os.environ.get("CODEX_HOME", _home() / ".codex"))
+
+
+def _codex_auth() -> tuple[str, str] | None:
+    """ChatGPT (access_token, account_id) from ~/.codex/auth.json, or None."""
+    try:
+        data = json.loads((_codex_home() / "auth.json").read_text())
+        tokens = data.get("tokens") or {}
+        token = tokens.get("access_token")
+        if not token:
+            return None
+        return token, tokens.get("account_id") or ""
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
+
+
+def _codex_add_windows(p: ProviderUsage, primary: dict, secondary: dict,
+                       used_key: str, reset_key: str) -> None:
+    if primary.get(used_key) is not None:
+        p.windows.append(Window("5h", float(primary[used_key]),
+                                _parse_reset(primary.get(reset_key))))
+    if secondary.get(used_key) is not None:
+        p.windows.append(Window("7d", float(secondary[used_key]),
+                                _parse_reset(secondary.get(reset_key))))
+
+
+def _fetch_codex_live(token: str, account_id: str) -> ProviderUsage | None:
+    """Live usage from the same endpoint `codex /status` uses; None on failure."""
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "User-Agent": f"codex-cli/{CLAUDE_CODE_VERSION}",
+    }
+    if account_id:
+        headers["ChatGPT-Account-Id"] = account_id
+    try:
+        data = _http_json(urllib.request.Request(CODEX_USAGE_URL, headers=headers))
+    except (urllib.error.HTTPError, urllib.error.URLError,
+            json.JSONDecodeError, OSError):
+        return None
+    rl = data.get("rate_limit")
+    if not isinstance(rl, dict):
+        return None
     p = ProviderUsage(tag="cx", name="Codex")
-    base = Path(os.environ.get("CODEX_HOME", _home() / ".codex"))
-    sessions = base / "sessions"
+    _codex_add_windows(p, rl.get("primary_window") or {},
+                       rl.get("secondary_window") or {},
+                       "used_percent", "reset_at")
+    return p if p.windows else None
+
+
+def _fetch_codex_logs() -> ProviderUsage:
+    """Most recent rate_limits snapshot from local session logs (offline path)."""
+    p = ProviderUsage(tag="cx", name="Codex")
+    sessions = _codex_home() / "sessions"
     if not sessions.is_dir():
         p.configured = False
         return p
@@ -352,15 +410,20 @@ def fetch_codex() -> ProviderUsage:
         p.error = "no data"
         return p
 
-    primary = rl.get("primary") or {}
-    secondary = rl.get("secondary") or {}
-    if primary.get("used_percent") is not None:
-        p.windows.append(Window("5h", float(primary["used_percent"]),
-                                _parse_reset(primary.get("resets_at"))))
-    if secondary.get("used_percent") is not None:
-        p.windows.append(Window("7d", float(secondary["used_percent"]),
-                                _parse_reset(secondary.get("resets_at"))))
+    _codex_add_windows(p, rl.get("primary") or {}, rl.get("secondary") or {},
+                       "used_percent", "resets_at")
     return p
+
+
+def fetch_codex() -> ProviderUsage:
+    # Prefer the live endpoint (matches `codex /status`); the local-log snapshot
+    # is only as fresh as your last CLI run, so use it just as an offline fallback.
+    auth = _codex_auth()
+    if auth is not None:
+        live = _fetch_codex_live(*auth)
+        if live is not None:
+            return live
+    return _fetch_codex_logs()
 
 
 def _find_key(obj, key):
