@@ -7,7 +7,9 @@
 (defvar usage_open false)
 
 (defpoll usage
-  :interval "30s"
+  ;; This reads agent-usage's on-disk cache; stale providers refresh in the
+  ;; background, so a short popup poll interval does not spam provider APIs.
+  :interval "5s"
   :run-while usage_open
   :initial "{\"cc\":{\"name\":\"Claude Code\",\"present\":true,\"shown\":true,\"error\":\"\",\"w1\":{\"label\":\"5h\",\"pct\":0,\"state\":\"ok\",\"reset\":\"\",\"present\":true},\"w2\":{\"label\":\"7d\",\"pct\":0,\"state\":\"ok\",\"reset\":\"\",\"present\":true}},\"cx\":{\"name\":\"Codex\",\"present\":true,\"shown\":true,\"error\":\"\",\"w1\":{\"label\":\"5h\",\"pct\":0,\"state\":\"ok\",\"reset\":\"\",\"present\":true},\"w2\":{\"label\":\"7d\",\"pct\":0,\"state\":\"ok\",\"reset\":\"\",\"present\":true}},\"km\":{\"name\":\"Kimi\",\"present\":true,\"shown\":true,\"error\":\"\",\"w1\":{\"label\":\"5h\",\"pct\":0,\"state\":\"ok\",\"reset\":\"\",\"present\":true},\"w2\":{\"label\":\"7d\",\"pct\":0,\"state\":\"ok\",\"reset\":\"\",\"present\":true}},\"cu\":{\"name\":\"Cursor\",\"present\":true,\"shown\":true,\"error\":\"\",\"w1\":{\"label\":\"auto\",\"pct\":0,\"state\":\"ok\",\"reset\":\"\",\"present\":true},\"w2\":{\"label\":\"api\",\"pct\":0,\"state\":\"ok\",\"reset\":\"\",\"present\":true}}}"
   "agent-usage --eww --providers cc,cx,km,cu")

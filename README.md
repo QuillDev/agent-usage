@@ -27,16 +27,45 @@ is silently skipped.
 ## Usage
 
 ```sh
-agent-usage              # one compact line, e.g.  cc 14%  ·  cx 6%  ·  km 5%
+agent-usage              # one compact cached line, e.g.  cc 14%  ·  cx 6%  ·  km 5%
 agent-usage --watch      # Waybar-format JSON, reprinted every --interval seconds
 agent-usage --interval 30
 agent-usage --detail     # multi-line breakdown with reset ETAs
 agent-usage --notify     # send the breakdown as a desktop notification
 agent-usage --json       # structured output (all windows)
 agent-usage --eww        # JSON keyed by provider, shaped for the eww popup
+agent-usage --refresh-cache            # fetch selected providers now
+agent-usage --no-cache                 # bypass cache and fetch synchronously
+agent-usage --cache-ttl cc=300,cx=30   # override refresh cadence
 agent-usage --providers cc,cx,km,cu   # choose which providers to show
 agent-usage --remaining               # show usage left instead of used
 ```
+
+## Caching
+
+Normal display commands read a small on-disk cache first, then trigger a
+detached background refresh when a selected provider is missing or stale. That
+keeps bar/popup opens instant and prevents the bar plus popup from spamming the
+remote usage APIs.
+
+Cache files live in `$AGENT_USAGE_CACHE_DIR`, or
+`$XDG_CACHE_HOME/agent-usage`, falling back to `~/.cache/agent-usage`. The
+default refresh cadence is `cc=300,cx=30,km=300,cu=300` seconds. Override it
+with `--cache-ttl` or `AGENT_USAGE_CACHE_TTL`; pass a single number to apply it
+to every provider, or comma-separate per-provider values:
+
+```sh
+AGENT_USAGE_CACHE_TTL=cc=600,km=600,cu=600,cx=30 agent-usage --watch
+```
+
+For a fully warmed cache before the bar starts, run:
+
+```sh
+agent-usage --refresh-cache --providers cc,cx,km,cu
+```
+
+`--no-cache` restores the old behavior for one-off debugging: the command waits
+for live provider responses and does not read cached data.
 
 With `--remaining` (or `AGENT_USAGE_REMAINING=1`) every percentage/bar is
 flipped to show how much quota is **left** (a fuel gauge) rather than how much

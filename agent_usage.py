@@ -17,9 +17,8 @@ Providers
             is short-lived (~15 min); we refresh it via the refresh_token when
             expired and write the new token back atomically.
 
-Cursor is intentionally not implemented: it only exposes usage through an
-authenticated browser session (cookies), which has no clean headless path on
-Linux. See README.
+- cursor : GET https://cursor.com/api/usage-summary using the Cursor editor's
+           stored access token from ~/.config/Cursor/User/globalStorage/state.vscdb.
 
 Output modes
 ------------
@@ -29,6 +28,8 @@ Output modes
   agent-usage --detail   multi-line human-readable breakdown
   agent-usage --notify   send the breakdown as a desktop notification
   agent-usage --json     structured JSON for scripting
+  agent-usage --refresh-cache
+                         fetch selected providers now and update the on-disk cache
 
 Stdlib only — no third-party dependencies.
 """
@@ -50,6 +51,14 @@ from pathlib import Path
 
 HTTP_TIMEOUT = 15  # seconds
 CLAUDE_CODE_VERSION = "2.1.0"  # User-Agent fallback for the Claude usage call
+CACHE_VERSION = 1
+DEFAULT_CACHE_TTLS = {
+    "cc": 300,  # network APIs are where 429s hurt; refresh at most every 5 min.
+    "cx": 30,   # local file read, cheap but still cache for instant popups.
+    "km": 300,
+    "cu": 300,
+}
+CACHE_LOCK_TTL = 120
 
 
 # --------------------------------------------------------------------------
@@ -85,6 +94,14 @@ class ProviderUsage:
 # --------------------------------------------------------------------------
 def _home() -> Path:
     return Path(os.path.expanduser("~"))
+
+
+def _cache_dir() -> Path:
+    base = os.environ.get("AGENT_USAGE_CACHE_DIR")
+    if base:
+        return Path(os.path.expanduser(base))
+    xdg = os.environ.get("XDG_CACHE_HOME")
+    return Path(os.path.expanduser(xdg)) / "agent-usage" if xdg else _home() / ".cache" / "agent-usage"
 
 
 def _parse_reset(value) -> float | None:
@@ -137,6 +154,162 @@ def _fmt_eta(resets_at: float | None, now: float) -> str:
     if delta < 86400:
         return f"{delta // 3600}h"
     return f"{delta // 86400}d"
+
+
+def _provider_to_cache(p: ProviderUsage, fetched_at: float | None = None) -> dict:
+    return {
+        "version": CACHE_VERSION,
+        "fetched_at": fetched_at if fetched_at is not None else time.time(),
+        "provider": {
+            "tag": p.tag,
+            "name": p.name,
+            "configured": p.configured,
+            "error": p.error,
+            "windows": [
+                {"name": w.name, "used_pct": w.used_pct, "resets_at": w.resets_at}
+                for w in p.windows
+            ],
+        },
+    }
+
+
+def _provider_from_cache(tag: str, data: dict) -> ProviderUsage | None:
+    if data.get("version") != CACHE_VERSION:
+        return None
+    obj = data.get("provider")
+    if not isinstance(obj, dict) or obj.get("tag") != tag:
+        return None
+    name = obj.get("name") or PROVIDERS[tag][0]
+    p = ProviderUsage(
+        tag=tag,
+        name=name,
+        configured=bool(obj.get("configured", True)),
+        error=obj.get("error"),
+    )
+    windows = obj.get("windows") or []
+    if not isinstance(windows, list):
+        return None
+    for w in windows:
+        if not isinstance(w, dict) or w.get("name") is None or w.get("used_pct") is None:
+            continue
+        try:
+            p.windows.append(Window(str(w["name"]), float(w["used_pct"]), _parse_reset(w.get("resets_at"))))
+        except (TypeError, ValueError):
+            continue
+    return p
+
+
+def _cache_path(tag: str) -> Path:
+    return _cache_dir() / f"{tag}.json"
+
+
+def _read_cached(tag: str) -> tuple[ProviderUsage | None, float | None]:
+    try:
+        data = json.loads(_cache_path(tag).read_text())
+    except (OSError, json.JSONDecodeError):
+        return None, None
+    p = _provider_from_cache(tag, data)
+    if p is None:
+        return None, None
+    try:
+        fetched_at = float(data.get("fetched_at"))
+    except (TypeError, ValueError):
+        fetched_at = None
+    return p, fetched_at
+
+
+def _write_cached(p: ProviderUsage) -> None:
+    d = _cache_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    path = _cache_path(p.tag)
+    tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(_provider_to_cache(p), separators=(",", ":")))
+    os.replace(tmp, path)
+
+
+def _placeholder(tag: str, error: str = "refreshing") -> ProviderUsage:
+    return ProviderUsage(tag=tag, name=PROVIDERS[tag][0], error=error)
+
+
+def _parse_cache_ttls(value: str | None) -> dict[str, int]:
+    ttls = dict(DEFAULT_CACHE_TTLS)
+    if not value:
+        return ttls
+    default = None
+    for part in value.split(","):
+        if not part.strip():
+            continue
+        if "=" in part:
+            k, v = part.split("=", 1)
+            tag = k.strip()
+        else:
+            tag, v = "", part
+        try:
+            seconds = max(0, int(v.strip()))
+        except ValueError:
+            continue
+        if tag in ttls:
+            ttls[tag] = seconds
+        elif tag in ("", "*"):
+            default = seconds
+    if default is not None:
+        for tag in ttls:
+            ttls[tag] = default
+    return ttls
+
+
+def _lock_path(tag: str) -> Path:
+    return _cache_dir() / f"{tag}.lock"
+
+
+def _acquire_refresh_lock(tag: str) -> bool:
+    d = _cache_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    path = _lock_path(tag)
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        try:
+            if time.time() - path.stat().st_mtime > CACHE_LOCK_TTL:
+                path.unlink()
+                fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            else:
+                return False
+        except OSError:
+            return False
+    with os.fdopen(fd, "w") as f:
+        f.write(str(os.getpid()))
+    return True
+
+
+def _release_refresh_lock(tag: str) -> None:
+    try:
+        _lock_path(tag).unlink()
+    except OSError:
+        pass
+
+
+def _refresh_in_progress(tag: str) -> bool:
+    try:
+        return time.time() - _lock_path(tag).stat().st_mtime <= CACHE_LOCK_TTL
+    except OSError:
+        return False
+
+
+def _background_refresh(tag: str) -> None:
+    if _refresh_in_progress(tag):
+        return
+    script = Path(__file__).resolve()
+    try:
+        subprocess.Popen(
+            [sys.executable, str(script), "--refresh-cache", "--providers", tag],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError:
+        pass
 
 
 # --------------------------------------------------------------------------
@@ -532,10 +705,43 @@ def resolve_selection(arg: str | None) -> list[str]:
     return [t for t in ALL_TAGS if t in tags]
 
 
-def collect(selected: list[str]) -> list[ProviderUsage]:
+def refresh_cache(selected: list[str]) -> list[ProviderUsage]:
     results = []
     for tag in selected:
         name, fn = PROVIDERS[tag]
+        if not _acquire_refresh_lock(tag):
+            cached, _ = _read_cached(tag)
+            results.append(cached or _placeholder(tag))
+            continue
+        try:
+            try:
+                result = fn()
+            except Exception:  # never let one provider take down the bar
+                result = ProviderUsage(tag=tag, name=name, error="crash")
+            _write_cached(result)
+            results.append(result)
+        finally:
+            _release_refresh_lock(tag)
+    return results
+
+
+def collect(selected: list[str], use_cache: bool = True, cache_ttls: dict[str, int] | None = None) -> list[ProviderUsage]:
+    results = []
+    ttls = cache_ttls or dict(DEFAULT_CACHE_TTLS)
+    for tag in selected:
+        name, fn = PROVIDERS[tag]
+        if use_cache:
+            cached, fetched_at = _read_cached(tag)
+            ttl = ttls.get(tag, 300)
+            stale = fetched_at is None or time.time() - fetched_at >= ttl
+            if cached is not None:
+                if stale:
+                    _background_refresh(tag)
+                results.append(cached)
+                continue
+            _background_refresh(tag)
+            results.append(_placeholder(tag))
+            continue
         try:
             results.append(fn())
         except Exception:  # never let one provider take down the bar
@@ -554,7 +760,9 @@ def render_bar(results: list[ProviderUsage], remaining: bool = False) -> str:
     for r in results:
         if not r.configured:
             continue
-        if r.error:
+        if r.error == "refreshing":
+            parts.append(f"{r.tag} ...")
+        elif r.error:
             parts.append(f"{r.tag} !")
         else:
             pct = r.headline_pct
@@ -565,7 +773,7 @@ def render_bar(results: list[ProviderUsage], remaining: bool = False) -> str:
 
 def _alert_level(results: list[ProviderUsage]) -> str:
     """Worst status across providers, for the bar's icon/alert state."""
-    if any(r.configured and r.error for r in results):
+    if any(r.configured and r.error and r.error != "refreshing" for r in results):
         return "alert"
     pcts = [r.headline_pct for r in results
             if r.configured and not r.error and r.headline_pct is not None]
@@ -712,6 +920,8 @@ def main(argv=None) -> int:
     g.add_argument("--notify", action="store_true", help="send a desktop notification")
     g.add_argument("--json", action="store_true", help="structured JSON output")
     g.add_argument("--eww", action="store_true", help="JSON shaped for the eww popup")
+    g.add_argument("--refresh-cache", action="store_true",
+                   help="fetch selected providers now and update the cache")
     ap.add_argument("--interval", type=int, default=60,
                     help="seconds between refreshes in --watch mode (default 60)")
     ap.add_argument("--providers", metavar="cc,cx,km,cu",
@@ -722,19 +932,29 @@ def main(argv=None) -> int:
                     help="show usage remaining instead of used (also via "
                          "$AGENT_USAGE_REMAINING=1); colour still reflects "
                          "closeness to the limit")
+    ap.add_argument("--no-cache", action="store_true",
+                    help="fetch synchronously instead of reading cached data")
+    ap.add_argument("--cache-ttl", metavar="SECONDS|tag=SECONDS,...",
+                    help="cache refresh cadence (default: cc=300,cx=30,km=300,cu=300; "
+                         "also via $AGENT_USAGE_CACHE_TTL)")
     args = ap.parse_args(argv)
     selected = resolve_selection(args.providers)
     remaining = args.remaining or os.environ.get("AGENT_USAGE_REMAINING") in ("1", "true", "yes")
+    cache_ttls = _parse_cache_ttls(args.cache_ttl or os.environ.get("AGENT_USAGE_CACHE_TTL"))
+
+    if args.refresh_cache:
+        refresh_cache(selected)
+        return 0
 
     if args.watch:
         while True:
             try:
-                print(render_waybar(collect(selected), remaining), flush=True)
+                print(render_waybar(collect(selected, not args.no_cache, cache_ttls), remaining), flush=True)
             except Exception:
                 print(json.dumps({"text": "agents ?", "alt": "alert"}), flush=True)
             time.sleep(max(5, args.interval))
 
-    results = collect(selected)
+    results = collect(selected, not args.no_cache, cache_ttls)
     if args.detail:
         print(render_detail(results, remaining))
     elif args.notify:
